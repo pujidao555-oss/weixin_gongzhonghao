@@ -2,6 +2,7 @@ numpy
 opencv-python
 Pillow
 rapidocr-onnxruntime
+requests
 # 可选：装 torch + lightglue 后 visual_matcher 自动切 SuperPoint 后端
 # torch
 # lightglue

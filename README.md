@@ -1,29 +1,36 @@
 # weixin_gongzhonghao
 
-微信公众号「贴图」瀑布流：卡片识别 → 逐个打开详情（可选复制链接）的本机 RPA 脚本集。
+微信公众号「贴图」瀑布流本机流水线：**扫卡目录 → 采集超链接 → 按链接下载图片集**。
 
-> 同步自本机 `wx_gzh` 昨晚可用版本（2026-11-04）。轮廓特征是**代码写死的几何/色块/ROI 规则**，不是开跑前先看截图再总结，也不是离线训练后再扫；每帧同一套规则现检，滚动中用 Track 配准。
+> 同步自本机 `wx_gzh` 可用版本（2026-11-04）。轮廓特征是代码写死的几何/色块/ROI 规则，不是开跑前先看截图再总结；每帧同一套规则现检，滚动中用 Track 配准。
 
-## 脚本一览
+## 三脚本对应关系
 
 | 编号 | 入口 | 作用 |
 |------|------|------|
 | **脚本1** | `tools/scan_waterfall_catalog.py` | 扫瀑布流：数卡、定位、指纹/Track、回顶，写出目录 |
-| **脚本2** | `tools/collect_waterfall_links.py` | 按目录找卡、点击、复制 mp 链接、关详情（采链） |
-| **脚本3** | `tools/test_open_waterfall_cards.py` + `.cmd` | 测试：脚本1 扫完后逐个打开→约 2s 关详情（不复制链接） |
+| **脚本2** | `tools/collect_waterfall_links.py` | 按目录找卡、打开详情、复制 `mp.weixin` 链接 |
+| **脚本3** | `run_tietu_pipeline.py --phase download` + `tools/tie_tu_pipeline.py` | **根据链接下载图片集**（不操作微信） |
 
-依赖模块（脚本1/2/3 共用）：
+总控（可一次跑完三段）：
 
-- `card_roi.py` — 整卡轮廓 ROI
-- `scroll_tracker.py` — 相邻帧纵向位移 / 累计滚动
-- `card_tracker.py` — PARTIAL→CONFIRMED Track
-- `visual_matcher.py` — Re-ID（SIFT 默认；有 torch+LightGlue 可升）
+```bat
+run_tietu_pipeline.cmd
+run_tietu_pipeline.cmd --phase scan
+run_tietu_pipeline.cmd --phase link --limit 3
+run_tietu_pipeline.cmd --phase download
+run_tietu_pipeline.cmd --status
+```
+
+辅助测试（**不是脚本3**）：`test_open_waterfall_cards.cmd` — 只验证打开/关闭卡片，不复制链接、不下载。
+
+依赖模块：`card_roi.py` / `scroll_tracker.py` / `card_tracker.py` / `visual_matcher.py`
 
 ---
 
 ## 环境
 
-- Windows + 已登录微信 PC，打开目标公众号资料页「贴图」瀑布流
+- Windows + 已登录微信 PC，打开目标公众号资料页「贴图」
 - Python 3.10+ 建议
 
 ```bat
@@ -31,134 +38,107 @@ pip install -r requirements.txt
 copy tools\wx_geom.example.json tools\wx_geom.json
 ```
 
-按本机微信窗口改 `tools/wx_geom.json`（`L/T/R/B/H`）。
+按本机窗口改 `tools/wx_geom.json`（`L/T/R/B/H`）。  
+图片默认下到 `%USERPROFILE%\Downloads\<标题>\images\`。
 
-快速测试：
+任务结束后 CMD 会暂停，按任意键再关。
+
+---
+
+## 脚本1：扫目录（`scan_waterfall_catalog.py`）
+
+### 目标
+
+准确得到贴图卡片**数量与位置**（标题 OCR 第二优先）。
+
+### 主流程
+
+1. 误入详情则点「…」右侧关闭（`DOTS+(40,0)`）
+2. 确认资料页并尽量点「贴图」
+3. 向下扫描：截屏 → 识别 → 滚轮；Track 确认后可补标题 OCR
+4. **原路回顶**：按下行净滚轮格数上滚（速度×2）
+
+### 规则要点
+
+- 默认 `card_roi`：整卡轮廓 → `#2F2F30` 底栏 → aHash `fp`；`--method bar` 可回退
+- 卡宽约 `[260,310]`；列轨道；`poster_h` 区分半截/可确认
+- 约 **1 秒 1 格** 下滚；连续无新增判到底
+- Track：`delta_y` 配准 + uuid 确认；同名靠 fp/uuid/列+global_y
+
+### 产出
+
+`tools/waterfall_catalog.json`、`waterfall_catalog_clean.json`、`waterfall_progress.txt`
+
+---
+
+## 脚本2：采链（`collect_waterfall_links.py`）
+
+### 目标
+
+按目录逐张打开详情，复制 `mp.weixin.qq.com/s/...` 链接。
+
+### 主流程
+
+打开前关残留详情 → 贴图列表 → 指纹/位置 seek → 点海报 → 等详情 → 复制链接 → 关闭
+
+### 匹配优先级
+
+`card_uuid` → 精确/软 `fp` → 列+预测 `bar_y` → 标题只加分
+
+### 其它
+
+- 本屏缓存：画面未变不重识别
+- 点下一张前 `scroll_toward` 最多 **10** 次；到底无位移提前停
+
+### 产出
+
+`tools/waterfall_links.json`、`waterfall_seen.json`
+
+---
+
+## 脚本3：按链接下载图片集
+
+### 入口
 
 ```bat
-test_open_waterfall_cards.cmd
-test_open_waterfall_cards.cmd --limit 3
-test_open_waterfall_cards.cmd --skip-scan --limit 5
+run_tietu_pipeline.cmd --phase download
+python -u run_tietu_pipeline.py --phase download --limit 3
 ```
 
-任务结束后 CMD **不会自动关闭**（需按键）。
-
----
-
-## 脚本1：`scan_waterfall_catalog.py`（扫目录）
+核心实现：`tools/tie_tu_pipeline.py` → `download_by_url(url, title)`  
+总控阶段：`run_tietu_pipeline.py` → `phase_download()`
 
 ### 目标
 
-准确得到贴图卡片**数量与位置**（`waterfall_catalog.json` / `waterfall_catalog_clean.json`），标题 OCR 为第二优先。
+读取脚本2 产出的超链接（`waterfall_links.json` / `tietu_state.json`），**不操作微信**，批量下载每条贴图文章里的幻灯片图片。
 
 ### 主流程
 
-1. 若误入详情：点「…」右侧关闭（`DOTS + (40,0)`）
-2. `ensure_tietu_list`：确认资料页（关注/已关注 + 私信|赞|多卡），尽量点「贴图」Tab
-3. **向下扫描**：每步截屏 →（可选并行）识别 → 滚轮
-4. Track 确认后可补 OCR 标题（默认滚动中不做 OCR）
-5. **原路回顶**：记录下行净滚轮格数，标题补完后按相同格数上滚（速度 ×2）；OCR 只做回顶校验日志
+1. 汇总状态里 `link_ok` / 有 `link` 的条目（可从 `waterfall_links.json` 回填）
+2. 已下载且 `images/` 非空则跳过
+3. 对每条链接：
+   - HTTP GET 文章 HTML（微信 UA + Referer）
+   - 解析 `picture_page_info_list` / 幻灯片 `cdn_url`（过滤水印）
+   - 逐张下载到 `Downloads/<安全标题>/images/001.jpg…`
+   - 写同目录 Markdown（标题+原文链接）
+4. 更新 `tools/tietu_state.json` 状态（`downloaded` / `dl_fail`）
 
-### 轮廓 / 识别规则（写死，非样本总结）
+### 规则要点
 
-- 默认 `method=card_roi`：双列整卡轮廓 → 关联 `#2F2F30` 底栏 → aHash 指纹 `fp`
-- `--method bar`：仅旧底栏色块路径
-- 卡宽门禁约 `CARD_W ∈ [260, 310]`；列轨道 `COL_*`；`poster_h` 门槛区分半截/可 enroll
-- 底栏灰条服务标题 OCR，**不是**数卡的第一依据
-- `require_bar` 可关：轮廓优先，避免底栏 fill 误杀
+- **不依赖微信窗口**；只需网络能访问 `mp.weixin.qq.com` 与 `mmbiz.qpic.cn`
+- CDN 图带 `Referer: https://mp.weixin.qq.com/`
+- 文件名剔除 Windows 非法字符，标题截断约 80 字
+- 支持 `--limit N` 只下前 N 条有链接项
 
-### 滚动规则
+### 产出示例
 
-- 默认节奏：约 **1 秒 1 格** 中键滚轮（`SCAN_DOWN_NOTCHES=1`，`SCAN_SETTLE_S=1.0`）
-- 连续无新增达 `SCAN_STAGNANT_LIMIT` 判到底
-- 与上一屏底部 key 无重叠时回退若干格补扫
-- 回顶：**按下行累计格数返还**，不是靠 OCR 提前打断上滚
-
-### Track 规则
-
-- `ScrollTracker` 估计 `delta_y` / `cumulative_scroll_y`
-- `CardTrackManager`：位置续跟 → Re-ID → 确认后发 `card_uuid`
-- 目录以 **confirmed uuid** 为准；同名卡靠 fp/uuid/列+global_y 区分
-
-### 产出
-
-- `tools/waterfall_catalog.json`
-- `tools/waterfall_catalog_clean.json`
-- `tools/waterfall_progress.txt`
-- `tools/waterfall_tracks_debug.json`（调试）
-
----
-
-## 脚本2：`collect_waterfall_links.py`（采链）
-
-### 目标
-
-按脚本1 目录，逐张打开详情并复制 `mp.weixin.qq.com/s/...` 链接。
-
-### 主流程（单张）
-
-1. 打开前点「…」右侧关闭（防残留详情）
-2. `ensure_tietu` 回贴图列表
-3. `scroll_until_fingerprint`：本屏匹配 → 小步下滚；画面未变复用本屏缓存
-4. 点击海报（复用 seek 命中坐标，避免二次整卡识别）
-5. `wait_detail` 确认进入详情
-6. 复制链接和弦 → 关详情 → 回贴图
-
-### 匹配优先级（禁止仅靠标题点卡）
-
-1. `card_uuid`
-2. 精确 / 软 `fp`（aHash 汉明距离）
-3. 列 + 预测 `bar_y`（`global_bar_y - cum_scroll_y`）
-4. 标题只加分，不单独决定
-
-### 其它规则
-
-- `OpenSession`：跨卡保持 `cum_scroll_y` + `ScreenCapsCache`（未滚动不重识别）
-- `scroll_toward_global_y`：点下一张前对准滚动，**最多 10 次**；连续无位移提前停（到底）
-- 点击前日志：本屏几张、点本屏第几张、还剩几张后需滚动
-
-### 产出
-
-- `tools/waterfall_links.json`
-- `tools/waterfall_seen.json`
-- `tools/waterfall_progress.txt`
-
----
-
-## 脚本3：`test_open_waterfall_cards.py`（打开测试）
-
-### 目标
-
-验证「扫目录 → 逐个打开 → 关闭」全链路，**不复制链接**，方便调点击/滚动。
-
-### 主流程
-
-1. Phase1：调用脚本1 `scan.main`（可用 `--skip-scan` 读已有目录）
-2. Phase2：对目录每张卡
-   - 关残留详情 → 贴图页
-   - `scroll_toward_global_y` 对准
-   - `scroll_until_fingerprint` 命中
-   - 打印本屏库存日志 → 点击
-   - **固定等待约 2 秒后关详情**（不等待详情加载完成）
-   - 继续下一张（点一张、关一张、再小滚对准）
-
-### 策略说明
-
-「点一张 → 关详情 → 再对准下一张」适合双列瀑布流：本屏能点的点完，不够再滚；比每次从顶重找更稳，也减少同名误点。
-
-### 常用参数
-
-| 参数 | 含义 |
-|------|------|
-| `--limit N` | 只测前 N 张 |
-| `--skip-scan` | 跳过扫描，用已有 catalog |
-| `--method card_roi\|bar` | 扫描方法（默认 card_roi） |
-| `--no-ocr-titles` | 扫描不做标题 OCR |
-
-### 产出
-
-- `tools/test_open_cards_result.json`
-- `tools/test_open_cards_progress.txt`
+```
+%USERPROFILE%\Downloads\直线筛1028-2型…\
+  ├── images\
+  │     ├── 001.jpg
+  │     └── 002.jpg
+  └── 直线筛1028-2型….md
+```
 
 ---
 
@@ -168,21 +148,19 @@ test_open_waterfall_cards.cmd --skip-scan --limit 5
 weixin_gongzhonghao/
 ├── README.md
 ├── requirements.txt
-├── test_open_waterfall_cards.cmd          # 根目录快捷启动
+├── run_tietu_pipeline.py / .cmd          # 总控（含脚本3 download 阶段）
+├── test_open_waterfall_cards.cmd         # 辅助：只测打开卡片
 └── tools/
-    ├── scan_waterfall_catalog.py          # 脚本1
-    ├── collect_waterfall_links.py         # 脚本2
-    ├── test_open_waterfall_cards.py       # 脚本3
-    ├── test_open_waterfall_cards.cmd
-    ├── card_roi.py
-    ├── card_tracker.py
-    ├── scroll_tracker.py
-    ├── visual_matcher.py
-    └── wx_geom.example.json               # 复制为 wx_geom.json 后改坐标
+    ├── scan_waterfall_catalog.py         # 脚本1
+    ├── collect_waterfall_links.py        # 脚本2
+    ├── tie_tu_pipeline.py                # 脚本3 核心 download_by_url
+    ├── test_open_waterfall_cards.py      # 辅助测试
+    ├── card_roi.py / card_tracker.py / scroll_tracker.py / visual_matcher.py
+    └── wx_geom.example.json
 ```
 
 ## 注意
 
-- 仅供本人授权窗口上的自动化；需本机前台微信窗口与 DPI 坐标匹配
-- 运行产物（截图、catalog、进度）默认 gitignore，勿提交隐私截图
-- 关闭按钮坐标相对「…」标定；分辨率/布局变化时需重标定 `DOTS_SCREEN`
+- 仅供本人授权场景；运行截图与 catalog 默认 gitignore
+- 关闭按钮相对「…」标定，布局变化需重标 `DOTS_SCREEN`
+- 微信 CDN 直链可能过期；失败时重新跑脚本2 采链后再 download
