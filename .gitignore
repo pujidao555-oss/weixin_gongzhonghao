@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+tools/wx_geom.json
+tools/*.png
+tools/waterfall_*.json
+tools/waterfall_*.txt
+tools/test_open_cards_*.json
+tools/test_open_cards_*.txt
+tools/collect-*.png
+tools/seek-*.png
+tools/scan-*.png
+tools/test-open-*.png
+observation_steps/
+.agent_online_probe.txt
