@@ -12,7 +12,4 @@ python -u "%~dp0run_tietu_pipeline.py" %*
 set EXITCODE=%ERRORLEVEL%
 echo.
 echo [CMD] 退出码=%EXITCODE%
-echo.
-echo 任务已结束，按任意键关闭本窗口…
-pause >nul
 exit /b %EXITCODE%

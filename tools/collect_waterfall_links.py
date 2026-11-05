@@ -22,9 +22,9 @@ from rapidocr_onnxruntime import RapidOCR
 USER32 = ctypes.windll.user32
 USER32.SetProcessDPIAware()
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(r"d:\cursor_project\wx_gzh")
 OBS = ROOT / "observation_steps"
-TOOLS = Path(__file__).resolve().parent
+TOOLS = ROOT / "tools"
 OUT = TOOLS / "waterfall_links.json"
 SEEN = TOOLS / "waterfall_seen.json"
 CATALOG = TOOLS / "waterfall_catalog.json"
@@ -306,6 +306,8 @@ class OpenSession:
 
     cum_scroll_y: float = 0.0
     cache: ScreenCapsCache = field(default_factory=ScreenCapsCache)
+    # 点卡回放：相对顶部的净下滚格数（与 Phase1 click_at_notches 同坐标系）
+    wheel_notches_from_top: int = 0
 
 
 def get_screen_caps(
@@ -776,6 +778,10 @@ def open_card_by_fingerprint(
         f"click=({sx:.0f},{sy:.0f}) hit_fp={(target.get('fp') or '')[:10]}"
     )
     focus(hwnd)
+    # 点卡专用：先停在目标上 1s，方便人工确认要点哪张（不影响关详情等其它 click）
+    USER32.SetCursorPos(int(sx), int(sy))
+    write_progress(f"[HOVER] 鼠标停在目标卡片 1s 后点击 @ ({sx:.0f},{sy:.0f})")
+    time.sleep(1.0)
     click(sx, sy)
     return True, (sx, sy)
 
@@ -799,7 +805,8 @@ def scroll_until_fingerprint(
     """
     import scroll_tracker as _scroll_tracker
 
-    use_ocr = bool(title_id)
+    # 有 fp/uuid/列+y 时 seek 不做标题 OCR（最耗时）；标题只作无视觉键时的兜底
+    use_ocr = bool(title_id) and not (fp or card_uuid or (column and global_bar_y is not None))
     label = (
         (card_uuid[:8] if card_uuid else None)
         or (fp[:10] if fp else None)
@@ -813,8 +820,14 @@ def scroll_until_fingerprint(
         else (cum_scroll_y or 0.0)
     )
     base_cum = cum
-    seek_notches = 2
+    # 点击/seek 专用小滚：1 格，避免一次超过约一张卡高（不影响 Phase1 扫卡）
+    seek_notches = 1
     seek_settle = 0.35
+    write_progress(
+        f"seek 开始 key={label} ocr_titles={use_ocr} "
+        f"seek_notches={seek_notches} "
+        f"(有指纹/位置则关 OCR，只做轮廓+fp)"
+    )
 
     for step in range(max_steps):
         _shot, arr, caps = get_screen_caps(

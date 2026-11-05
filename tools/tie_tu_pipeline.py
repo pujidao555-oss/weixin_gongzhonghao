@@ -31,12 +31,12 @@ VK_ESCAPE = 0x1B
 VK_C = 0x43
 VK_V = 0x56
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(r"d:\cursor_project\wx_gzh")
 OBS = ROOT / "observation_steps"
-TOOLS = Path(__file__).resolve().parent
+TOOLS = ROOT / "tools"
 GEOM = TOOLS / "wx_geom.json"
 STATE = TOOLS / "tie_tu_seen.json"
-DOWNLOADS = Path.home() / "Downloads"
+DOWNLOADS = Path(r"C:\Users\boyaq\Downloads")
 
 HEADERS = {
     "User-Agent": (

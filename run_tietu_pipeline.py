@@ -47,7 +47,7 @@ CATALOG_CLEAN = TOOLS / "waterfall_catalog_clean.json"
 CATALOG_RAW = TOOLS / "waterfall_catalog.json"
 LINKS_PATH = TOOLS / "waterfall_links.json"
 PROGRESS = TOOLS / "waterfall_progress.txt"
-DOWNLOADS = Path.home() / "Downloads"
+DOWNLOADS = Path(r"C:\Users\boyaq\Downloads")
 
 _T0 = time.time()
 

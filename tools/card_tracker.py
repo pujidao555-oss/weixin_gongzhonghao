@@ -55,9 +55,13 @@ class CardTrack:
     hit_count: int = 0
     method: str = ""
     ink: float = 0.0
+    # 点卡回放：首次完整可点时的滚轮格数 + 当时窗口内点击坐标（仅追加字段）
+    click_at_notches: int | None = None
+    click_cx: float | None = None
+    click_cy: float | None = None
 
     def to_catalog_item(self) -> dict:
-        return {
+        item = {
             "text": self.title or f"贴图_{(self.fp or self.track_id)[:10]}",
             "title_id": self.title_id,
             "key": self.card_uuid or self.track_id,
@@ -83,6 +87,11 @@ class CardTrack:
             "ink": self.ink,
             "method": self.method or "track",
         }
+        if self.click_at_notches is not None:
+            item["click_at_notches"] = int(self.click_at_notches)
+            item["click_cx"] = float(self.click_cx if self.click_cx is not None else self.cx)
+            item["click_cy"] = float(self.click_cy if self.click_cy is not None else self.cy)
+        return item
 
 
 class CardTrackManager:
@@ -116,16 +125,54 @@ class CardTrackManager:
             return None
         return frame[y0:y1, x0:x1].copy()
 
+    def _maybe_stamp_click(
+        self,
+        t: CardTrack,
+        det: dict,
+        wheel_notches: int | None,
+        frame_h: int,
+    ) -> None:
+        """首次完整可点时记下滚轮格数 + 点击坐标（不改识别，只追加回放字段）。"""
+        if wheel_notches is None or t.click_at_notches is not None:
+            return
+        if not t.card_uuid or t.status not in ("FULL", "CONFIRMED"):
+            return
+        cx = float(det.get("cx") or t.cx or 0)
+        cy = float(det.get("cy") or t.cy or 0)
+        roi_y = int(det.get("roi_y") or t.roi_y or 0)
+        roi_h = int(det.get("roi_h") or t.roi_h or 0)
+        poster_h = int(det.get("poster_h") or t.poster_h or 0)
+        if cx <= 0 or cy <= 0:
+            return
+        # 首屏顶卡 cy≈540、roi_y≈400 也必须可打标；只排除贴顶半截 / 贴底半截
+        if cy < 500 or cy > frame_h - 70:
+            return
+        if roi_y < 350:
+            return
+        # 底边被裁太多则等滚完整再记（避免点到半卡）
+        if frame_h > 0 and roi_y + max(roi_h, poster_h) > frame_h - 8:
+            if poster_h < POSTER_H_FULL:
+                return
+        t.click_at_notches = int(wheel_notches)
+        t.click_cx = cx
+        t.click_cy = cy
+        self._log(
+            f"[REPLAY] stamp uuid={(t.card_uuid or '')[:8]} "
+            f"notches={t.click_at_notches} click=({cx:.0f},{cy:.0f})"
+        )
+
     def observe(
         self,
         detections: list[dict],
         frame_rgb: np.ndarray,
         cumulative_scroll_y: float,
         delta_y: float = 0.0,
+        wheel_notches: int | None = None,
     ) -> tuple[int, int, int]:
         """吃进本屏检测。返回 (new_tracks, merges, new_uuids)。
 
         流程：轮廓检测结果 → 位置追踪延续 Track → 歧义才 Re-ID → 新卡建 Track。
+        wheel_notches: 本帧截屏时相对顶部的净下滚格数（点卡回放用）。
         """
         self.frame_idx += 1
         new_n = 0
@@ -133,6 +180,7 @@ class CardTrackManager:
         new_uuids = 0
         used_tracks: set[str] = set()
         scroll_jump = abs(float(delta_y)) >= REID_SCROLL_JUMP_PX
+        frame_h = int(frame_rgb.shape[0]) if frame_rgb is not None else 1800
 
         # 按 y 排序，稳定匹配
         dets = sorted(
@@ -155,6 +203,7 @@ class CardTrackManager:
                 used_tracks.add(hit.track_id)
                 before_uuid = hit.card_uuid
                 self._update_track(hit, det, gy, gbar, crop, poster_h)
+                self._maybe_stamp_click(hit, det, wheel_notches, frame_h)
                 merge_n += 1
                 if hit.card_uuid and not before_uuid:
                     new_uuids += 1
@@ -169,6 +218,7 @@ class CardTrackManager:
             track = self._spawn_track(det, col, gy, gbar, crop, poster_h)
             self.tracks.append(track)
             used_tracks.add(track.track_id)
+            self._maybe_stamp_click(track, det, wheel_notches, frame_h)
             new_n += 1
             if track.card_uuid:
                 new_uuids += 1
