@@ -2,7 +2,7 @@
 
 微信公众号「贴图」瀑布流本机流水线：**扫卡目录 → 采集超链接 → 按链接下载图片集**。
 
-> 同步自本机 `wx_gzh` 可用版本（2026-11-04）。轮廓特征是代码写死的几何/色块/ROI 规则，不是开跑前先看截图再总结；每帧同一套规则现检，滚动中用 Track 配准。
+> 同步自本机 `wx_gzh` 可用版本（2026-11-05）。轮廓特征是代码写死的几何/色块/ROI 规则，不是开跑前先看截图再总结；每帧同一套规则现检，滚动中用 Track 配准。点卡默认「混合回放」（已实测全对）。
 
 ## 三脚本对应关系
 
@@ -23,6 +23,22 @@ run_tietu_pipeline.cmd --status
 ```
 
 辅助测试（**不是脚本3**）：`test_open_waterfall_cards.cmd` — 只验证打开/关闭卡片，不复制链接、不下载。
+
+```bat
+test_open_waterfall_cards.cmd
+test_open_waterfall_cards.cmd --limit 3
+test_open_waterfall_cards.cmd --no-replay
+test_open_waterfall_cards.cmd --scroll-key
+```
+
+**默认 Phase2 = 混合回放**（按卡驱动，不追扫卡底部空滚）：
+
+1. 按 `click_at_notches` 滚到目标格  
+2. 点前轻校验本屏轮廓+fp；命中且距记录坐标 ≤160px 才用本屏坐标（防串卡）  
+3. 已点过的 fp 排除；未采纳则 ±1 微调，再不行用记录坐标，最后回退旧 seek  
+4. 点卡前鼠标在目标停 1s；详情约 2s 后关  
+
+`--no-replay`：旧「点一张→小滚→强制重识别」。`--scroll-key`：实验用 ↓/↑（微信未必吃）。
 
 依赖模块：`card_roi.py` / `scroll_tracker.py` / `card_tracker.py` / `visual_matcher.py`
 
@@ -67,7 +83,16 @@ copy tools\wx_geom.example.json tools\wx_geom.json
 
 ### 产出
 
-`tools/waterfall_catalog.json`、`waterfall_catalog_clean.json`、`waterfall_progress.txt`
+`tools/waterfall_catalog.json`、`waterfall_catalog_clean.json`、`waterfall_scan_meta.json`、`waterfall_progress.txt`
+
+### 回放字段（追加，不改识别算法）
+
+每张确认卡可带：
+
+- `click_at_notches`：首次完整可点时相对顶部的净下滚格数
+- `click_cx` / `click_cy`：当时窗口内可点坐标
+
+`waterfall_scan_meta.json` 含 `down_notches_total`（扫卡到底格数；点卡不必追空滚）。
 
 ---
 

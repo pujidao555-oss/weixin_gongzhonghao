@@ -5,12 +5,13 @@ set PYTHONUNBUFFERED=1
 cd /d "%~dp0"
 echo ========================================
 echo  单独测试：贴图瀑布流
-echo  底栏#2F2F30 + 宽度 + 标题色 + 标题识别码
+echo  整卡ROI + 底栏OCR + 指纹（--method bar 可回退）
 echo  快扫回顶 → 逐个打开卡片（不复制链接）
 echo  工作目录: %CD%
 echo  用法示例:
 echo    test_open_waterfall_cards.cmd
 echo    test_open_waterfall_cards.cmd --limit 3
+echo    test_open_waterfall_cards.cmd --method bar --limit 3
 echo    test_open_waterfall_cards.cmd --skip-scan --limit 5
 echo  参数: %*
 echo ========================================

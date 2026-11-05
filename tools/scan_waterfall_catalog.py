@@ -16,9 +16,9 @@ from rapidocr_onnxruntime import RapidOCR
 USER32 = ctypes.windll.user32
 USER32.SetProcessDPIAware()
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(r"d:\cursor_project\wx_gzh")
 OBS = ROOT / "observation_steps"
-TOOLS = Path(__file__).resolve().parent
+TOOLS = ROOT / "tools"
 CATALOG = TOOLS / "waterfall_catalog.json"
 PROGRESS = TOOLS / "waterfall_progress.txt"
 
@@ -162,8 +162,154 @@ def load_geom():
     return json.loads((TOOLS / "wx_geom.json").read_text(encoding="utf-8-sig"))
 
 
+SW_RESTORE = 9
+
+
+def _window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    r = RECT()
+    if not USER32.GetWindowRect(int(hwnd), ctypes.byref(r)):
+        return None
+    return int(r.left), int(r.top), int(r.right), int(r.bottom)
+
+
+def _rect_is_offscreen_minimized(rect: tuple[int, int, int, int] | None) -> bool:
+    """Windows 最小化窗常报到约 (-32000,-32000)；半屏停靠不会是这个值。"""
+    if not rect:
+        return True
+    l, t, r, b = rect
+    return l <= -10000 or t <= -10000 or (r - l) < 200 or (b - t) < 200
+
+
+def _ensure_window_restored(hwnd: int) -> tuple[int, int, int, int] | None:
+    """若最小化则还原，再取矩形。"""
+    hwnd = int(hwnd)
+    if USER32.IsIconic(hwnd):
+        write_progress(f"检测到微信窗最小化 H={hwnd}，尝试还原…")
+        USER32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.35)
+    USER32.SetForegroundWindow(hwnd)
+    time.sleep(0.2)
+    return _window_rect(hwnd)
+
+
+def find_wechat_hwnd(prefer_geom: dict | None = None) -> int | None:
+    """按标题「微信」找**未最小化**的主窗；本机可能同时存在多个微信 HWND。"""
+    from ctypes import wintypes
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    candidates: list[tuple[int, int, int, int, int, int]] = []
+
+    def _cb(hwnd, _lp):
+        hwnd = int(hwnd)
+        buf = (ctypes.c_wchar * 512)()
+        USER32.GetWindowTextW(hwnd, buf, 512)
+        title = buf.value or ""
+        if "微信" not in title and "Weixin" not in title and "WeChat" not in title:
+            return True
+        # 跳过最小化：否则会误锁到 -32000 幽灵窗，而用户半屏看的是另一个 HWND
+        if USER32.IsIconic(hwnd):
+            return True
+        if not USER32.IsWindowVisible(hwnd):
+            return True
+        rect = _window_rect(hwnd)
+        if _rect_is_offscreen_minimized(rect):
+            return True
+        assert rect is not None
+        l, t, r, b = rect
+        w, h = r - l, b - t
+        if w < 600 or h < 500:
+            return True
+        candidates.append((hwnd, l, t, r, b, w * h))
+        return True
+
+    USER32.EnumWindows(EnumWindowsProc(_cb), 0)
+    if not candidates:
+        return None
+    if prefer_geom:
+        pl = int(prefer_geom.get("L", 0))
+        pt = int(prefer_geom.get("T", 0))
+        pr = int(prefer_geom.get("R", 0))
+        pb = int(prefer_geom.get("B", 0))
+        # 旧 geom 若已是 -32000，不要用它做亲近排序
+        if pl > -10000 and pt > -10000:
+
+            def score(item):
+                _h, l, t, r, b, _area = item
+                return abs(l - pl) + abs(t - pt) + abs(r - pr) + abs(b - pb)
+
+            candidates.sort(key=score)
+        else:
+            candidates.sort(key=lambda z: -z[5])
+    else:
+        candidates.sort(key=lambda z: -z[5])
+    return candidates[0][0]
+
+
+def refresh_geom(geom: dict | None = None, *, save: bool = True) -> dict:
+    """校验/刷新 wx_geom.json 的 H；句柄失效或最小化则重找可见微信窗并写回。"""
+    g = dict(geom or load_geom())
+    hwnd = int(g.get("H") or 0)
+    alive = bool(hwnd) and bool(USER32.IsWindow(hwnd))
+    if alive:
+        rect = _ensure_window_restored(hwnd)
+        if rect and not _rect_is_offscreen_minimized(rect):
+            l, t, r, b = rect
+            if (l, t, r, b) != (
+                int(g.get("L", 0)),
+                int(g.get("T", 0)),
+                int(g.get("R", 0)),
+                int(g.get("B", 0)),
+            ):
+                write_progress(
+                    f"窗口矩形已变：{(g.get('L'), g.get('T'), g.get('R'), g.get('B'))} → {(l, t, r, b)}"
+                )
+                g.update({"L": l, "T": t, "R": r, "B": b, "H": hwnd})
+                if save:
+                    (TOOLS / "wx_geom.json").write_text(
+                        json.dumps(g, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+            return g
+        write_progress(
+            f"当前句柄不可用或仍最小化 H={hwnd} rect={rect}，改找可见微信主窗…"
+        )
+    else:
+        write_progress(f"窗口句柄失效 H={hwnd}，正在重找微信主窗…")
+    new_h = find_wechat_hwnd(g)
+    if not new_h:
+        raise RuntimeError(
+            "未找到可见的微信窗口（已排除最小化）。"
+            "请把微信半屏/还原显示在桌面上，并打开公众号贴图页。"
+        )
+    rect = _ensure_window_restored(new_h)
+    if _rect_is_offscreen_minimized(rect):
+        raise RuntimeError(
+            f"找到微信窗 H={new_h} 但仍像最小化 rect={rect}，请手动点一下微信窗口后再试"
+        )
+    assert rect is not None
+    l, t, r, b = rect
+    g.update({"L": l, "T": t, "R": r, "B": b, "H": int(new_h)})
+    write_progress(f"已刷新微信窗 H={new_h} rect=({l},{t},{r},{b})")
+    if save:
+        (TOOLS / "wx_geom.json").write_text(
+            json.dumps(g, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    return g
+
+
 def focus(hwnd):
-    USER32.SetForegroundWindow(int(hwnd))
+    hwnd = int(hwnd)
+    if USER32.IsIconic(hwnd):
+        USER32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.25)
+    USER32.SetForegroundWindow(hwnd)
     time.sleep(0.25)
 
 
@@ -1035,11 +1181,43 @@ def clean_catalog(catalog: list[dict]) -> list[dict]:
     return final
 
 
+def require_wechat_window(*, save_geom: bool = True) -> dict:
+    """脚本1门禁：必须先拿到有效微信主窗，否则抛错中止。
+
+    1) 校验/刷新 wx_geom.json 句柄与矩形
+    2) 前置窗口
+    3) 截屏 OCR：需像公众号资料页（关注/已关注 + 私信|赞|多卡）
+    """
+    PROGRESS.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        geom = refresh_geom(save=save_geom)
+    except RuntimeError as exc:
+        write_progress(f"门禁失败：{exc}")
+        raise
+    hwnd = int(geom["H"])
+    if not USER32.IsWindow(hwnd):
+        msg = f"门禁失败：刷新后句柄仍无效 H={hwnd}"
+        write_progress(msg)
+        raise RuntimeError(msg)
+    focus(hwnd)
+    write_progress(
+        f"门禁：已定位微信窗 H={hwnd} "
+        f"rect=({geom['L']},{geom['T']},{geom['R']},{geom['B']})"
+    )
+    if not ensure_tietu_list(geom, hwnd):
+        msg = (
+            "门禁失败：已找到微信窗，但未识别到公众号资料/贴图页"
+            "（需关注或已关注，且私信/赞/多卡）。请先打开目标公众号贴图瀑布流。"
+        )
+        write_progress(msg)
+        raise RuntimeError(msg)
+    write_progress("门禁通过：微信公众号贴图页已确认，开始扫描")
+    return geom
+
+
 def main(ocr_titles: bool = True, method: str = "card_roi"):
     from concurrent.futures import ThreadPoolExecutor
 
-    geom = load_geom()
-    hwnd = int(geom["H"])
     PROGRESS.write_text("", encoding="utf-8")
     # 滚动中：快扫默认关 OCR；用户显式 ocr_titles 且 SCAN_OCR_DURING 才边滚边 OCR
     ocr_during = bool(ocr_titles) and (SCAN_OCR_DURING or not SCAN_FAST)
@@ -1053,9 +1231,12 @@ def main(ocr_titles: bool = True, method: str = "card_roi"):
         f" | method={method} | CARD_W=[{CARD_W_MIN},{CARD_W_MAX}]"
     )
 
-    if not ensure_tietu_list(geom, hwnd):
-        write_progress("无法回到贴图列表，中止")
+    try:
+        geom = require_wechat_window(save_geom=True)
+    except RuntimeError:
+        write_progress("脚本1中止：未满足微信公众号窗口门禁")
         return []
+    hwnd = int(geom["H"])
 
     focus(hwnd)  # 只前置一次，后续滚动不再 focus
     catalog: list[dict] = []
@@ -1099,6 +1280,8 @@ def main(ocr_titles: bool = True, method: str = "card_roi"):
             arr_now, path = grab_arr(
                 geom, f"scan-down-{step:02d}.png", save=do_save
             )
+            # 本帧截屏时相对顶部的净下滚格数（先记再滚，供点卡回放）
+            notches_at_frame = int(down_notches_total)
             scroll_delta = 0.0
             if scroll_reg is not None:
                 scroll_delta = float(scroll_reg.register(arr_now).delta_y)
@@ -1142,6 +1325,7 @@ def main(ocr_titles: bool = True, method: str = "card_roi"):
                 arr_now, path = grab_arr(
                     geom, f"scan-down-{step:02d}-back.png", save=True
                 )
+                notches_at_frame = int(down_notches_total)
                 if scroll_reg is not None:
                     scroll_delta = float(scroll_reg.register(arr_now).delta_y)
                 caps = _detect(arr_now)
@@ -1157,6 +1341,7 @@ def main(ocr_titles: bool = True, method: str = "card_roi"):
                     arr_now,
                     scroll_reg.cumulative_scroll_y,
                     delta_y=scroll_delta,
+                    wheel_notches=notches_at_frame,
                 )
                 catalog = track_mgr.confirmed_catalog()
                 write_progress(
@@ -1269,24 +1454,40 @@ def main(ocr_titles: bool = True, method: str = "card_roi"):
     except Exception as exc:
         write_progress(f"回顶校验 OCR 异常（不影响继续）: {exc}")
     cleaned = clean_catalog(catalog)
+    replay_n = sum(1 for c in cleaned if c.get("click_at_notches") is not None)
     write_progress("=" * 40)
     write_progress(f"统计结果：共 {len(cleaned)} 张贴图（标题识别码/指纹去重）")
+    write_progress(
+        f"点卡回放字段：{replay_n}/{len(cleaned)} 张已记录 click_at_notches+坐标"
+    )
     short_n = sum(1 for c in cleaned if c.get("short"))
     write_progress(f"其中短卡(poster_h<{POSTER_H_SHORT}): {short_n} 张")
     for i, c in enumerate(cleaned, 1):
         tid = c.get("title_id") or "-"
         ph = c.get("poster_h")
         mark = "短" if c.get("short") else ""
+        rn = c.get("click_at_notches")
         write_progress(
             f"  {i}/{len(cleaned)}  {c['text']}  id={tid}  "
             f"w={c.get('bar_w','?')} poster_h={ph}{mark} "
-            f"fp={str(c.get('fp', c.get('key','')))[:10]}"
+            f"fp={str(c.get('fp', c.get('key','')))[:10]} "
+            f"replay_n={rn if rn is not None else '-'}"
         )
     write_progress("=" * 40)
     CATALOG.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
     (TOOLS / "waterfall_catalog_clean.json").write_text(
         json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    meta = {
+        "down_notches_total": int(down_notches_total),
+        "down_notches_per_step": int(down_n),
+        "replay_stamped": int(replay_n),
+        "total": int(len(cleaned)),
+    }
+    (TOOLS / "waterfall_scan_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    write_progress(f"扫描元数据 → waterfall_scan_meta.json {meta}")
     print(f"TOTAL={len(cleaned)}", flush=True)
     return cleaned
 
